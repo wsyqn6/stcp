@@ -14,4 +14,5 @@ var (
 	ErrInvalidVersion     = errors.New("invalid version")
 	ErrBodyToolong        = errors.New("body too long")
 	ErrUnexpectedPrefix   = errors.New("unexpected prefix")
+	ErrPacketTooLarge     = errors.New("packet too large")
 )

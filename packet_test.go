@@ -182,7 +182,38 @@ func TestConstants(t *testing.T) {
 		t.Errorf("expected NonceLength 32, got %d", NonceLength)
 	}
 
-	if Spider != "STCP" {
-		t.Errorf("expected Spider 'STCP', got '%s'", Spider)
+	if Stcp != "STCP" {
+		t.Errorf("expected Spider 'STCP', got '%s'", Stcp)
+	}
+}
+
+func TestMaxPacketSize(t *testing.T) {
+	if MaxPacketSize != 64*1024 {
+		t.Errorf("expected MaxPacketSize 65536, got %d", MaxPacketSize)
+	}
+
+	if MaxBodySize != MaxPacketSize-HeaderLength {
+		t.Errorf("MaxBodySize should be MaxPacketSize - HeaderLength")
+	}
+}
+
+func TestReadBodyTooLarge(t *testing.T) {
+	h := newHeader(HeaderTypeCryptoData, HeaderStatusSuccess, MaxBodySize+1)
+
+	var buf bytes.Buffer
+	buf.Write(h[:])
+
+	for i := 0; i < int(MaxBodySize+1); i++ {
+		buf.WriteByte(0)
+	}
+
+	loaded, err := ReadHeader(&buf)
+	if err != nil {
+		t.Fatalf("ReadHeader failed: %v", err)
+	}
+
+	_, err = loaded.ReadBody(&buf)
+	if err != ErrPacketTooLarge {
+		t.Errorf("expected ErrPacketTooLarge, got %v", err)
 	}
 }

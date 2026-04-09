@@ -11,7 +11,9 @@ const (
 	HeaderLength  = 10
 	ECDHKeyLength = 32
 	NonceLength   = 32
-	Spider        = "STCP"
+	Stcp          = "STCP"
+	MaxPacketSize = 64 * 1024
+	MaxBodySize   = MaxPacketSize - HeaderLength
 )
 
 type HeaderType = byte
@@ -97,6 +99,9 @@ func (h Header) ReadBody(r io.Reader) ([]byte, error) {
 	cl := h.ContentLength()
 	if cl == 0 {
 		return nil, ErrEmptyBody
+	}
+	if cl > MaxBodySize {
+		return nil, ErrPacketTooLarge
 	}
 	body := make([]byte, cl)
 	_, err := io.ReadFull(r, body)

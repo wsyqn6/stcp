@@ -14,14 +14,20 @@ import (
 	"time"
 )
 
+var bodyBufferPool = sync.Pool{
+	New: func() any {
+		b := make([]byte, MaxBodySize)
+		return &b
+	},
+}
+
 type Conn struct {
 	net.Conn
 	key           []byte
 	aesgcm        cipher.AEAD
 	kid           uint64
-	clientNonce   []byte
-	serverNonce   []byte
-	rbuf          []byte
+	clientNonce   [NonceLength]byte
+	serverNonce   [NonceLength]byte
 	rMu           sync.Mutex
 	wMu           sync.Mutex
 	readDeadline  atomic.Pointer[time.Time]
@@ -97,14 +103,17 @@ func (c *Conn) Read(b []byte) (n int, err error) {
 	if bodyLen == 0 {
 		return 0, ErrEmptyBody
 	}
+	if bodyLen > MaxBodySize {
+		return 0, ErrPacketTooLarge
+	}
 
-	body := make([]byte, bodyLen)
-	_, err = io.ReadFull(c.Conn, body)
+	cipherBody := make([]byte, bodyLen)
+	_, err = io.ReadFull(c.Conn, cipherBody)
 	if err != nil {
 		return 0, err
 	}
 
-	data, err := c.Decrypt(body)
+	data, err := c.Decrypt(cipherBody)
 	if err != nil {
 		return 0, err
 	}
@@ -172,18 +181,35 @@ func (c *Conn) handshake(conn net.Conn, isServer bool, cert *x509.Certificate, p
 }
 
 func (c *Conn) serverHandshake(conn net.Conn, cert *x509.Certificate, privateKey any) error {
-	publicKey := make([]byte, ECDHKeyLength)
-	if _, err := io.ReadFull(conn, publicKey); err != nil {
+	header, err := ReadHeader(conn)
+	if err != nil {
+		return err
+	}
+	if header.Type() != HeaderTypeCryptoHandshake {
+		return ErrUnexpectedPrefix
+	}
+	if header.Status() != HeaderStatusSuccess {
+		return ErrFailResponse
+	}
+
+	body, err := header.ReadBody(conn)
+	if err != nil {
 		return err
 	}
 
-	c.clientNonce = make([]byte, NonceLength)
-	if _, err := io.ReadFull(conn, c.clientNonce); err != nil {
-		return err
+	spiderBytes := body[:len(Stcp)]
+	for i := range spiderBytes {
+		if spiderBytes[i] != Stcp[i] {
+			return ErrUnexpectedPrefix
+		}
 	}
 
-	c.serverNonce = make([]byte, NonceLength)
-	if _, err := rand.Read(c.serverNonce); err != nil {
+	publicKey := body[len(Stcp) : len(Stcp)+ECDHKeyLength]
+	c.clientNonce = [NonceLength]byte{}
+	copy(c.clientNonce[:], body[len(Stcp)+ECDHKeyLength:])
+
+	_, err = rand.Read(c.serverNonce[:])
+	if err != nil {
 		return err
 	}
 
@@ -203,7 +229,7 @@ func (c *Conn) serverHandshake(conn net.Conn, cert *x509.Certificate, privateKey
 		return err
 	}
 	c.key = shareKey
-	c.kid = uint64(len(c.key)) // simple kid derivation
+	c.kid = uint64(len(c.key))
 
 	selfPubKey := selfPrivKey.PublicKey().Bytes()
 
@@ -214,21 +240,21 @@ func (c *Conn) serverHandshake(conn net.Conn, cert *x509.Certificate, privateKey
 
 	certLen := len(cert.Raw)
 	signLen := len(sign)
-	body := make([]byte, 2+certLen+ECDHKeyLength+signLen+NonceLength+8)
-	binary.BigEndian.PutUint16(body, uint16(certLen))
-	copy(body[2:], cert.Raw)
-	copy(body[2+certLen:], selfPubKey)
-	copy(body[2+certLen+ECDHKeyLength:], sign)
-	copy(body[2+certLen+ECDHKeyLength+signLen:], c.serverNonce)
-	binary.BigEndian.PutUint64(body[2+certLen+ECDHKeyLength+signLen+NonceLength:], c.kid)
+	respBody := make([]byte, 2+certLen+ECDHKeyLength+signLen+NonceLength+8)
+	binary.BigEndian.PutUint16(respBody, uint16(certLen))
+	copy(respBody[2:], cert.Raw)
+	copy(respBody[2+certLen:], selfPubKey)
+	copy(respBody[2+certLen+ECDHKeyLength:], sign)
+	copy(respBody[2+certLen+ECDHKeyLength+signLen:], c.serverNonce[:])
+	binary.BigEndian.PutUint64(respBody[2+certLen+ECDHKeyLength+signLen+NonceLength:], c.kid)
 
-	derivedKey := DeriveKey(c.key, c.clientNonce, c.serverNonce)
+	derivedKey := DeriveKey(c.key, c.clientNonce[:], c.serverNonce[:])
 	if err := c.initAESGCMKey(derivedKey); err != nil {
 		return err
 	}
 
 	conn.SetWriteDeadline(time.Now().Add(time.Second * 30))
-	err = SendOk(conn, HeaderTypeCryptoHandshake, body)
+	err = SendOk(conn, HeaderTypeCryptoHandshake, respBody)
 	if err != nil {
 		return err
 	}
@@ -242,15 +268,14 @@ func (c *Conn) clientHandshake(conn net.Conn, cert *x509.Certificate, rootCert *
 		return err
 	}
 
-	c.clientNonce = make([]byte, NonceLength)
-	if _, err := rand.Read(c.clientNonce); err != nil {
+	if _, err := rand.Read(c.clientNonce[:]); err != nil {
 		return err
 	}
 
-	body := make([]byte, len(Spider)+ECDHKeyLength+NonceLength)
-	copy(body, Spider)
-	copy(body[len(Spider):], privateKey.PublicKey().Bytes())
-	copy(body[len(Spider)+ECDHKeyLength:], c.clientNonce)
+	body := make([]byte, len(Stcp)+ECDHKeyLength+NonceLength)
+	copy(body, Stcp)
+	copy(body[len(Stcp):], privateKey.PublicKey().Bytes())
+	copy(body[len(Stcp)+ECDHKeyLength:], c.clientNonce[:])
 
 	err = SendOk(conn, HeaderTypeCryptoHandshake, body)
 	if err != nil {
@@ -308,10 +333,10 @@ func (c *Conn) clientHandshake(conn net.Conn, cert *x509.Certificate, rootCert *
 	}
 
 	kidPos := len(resBody) - 8
-	c.serverNonce = resBody[signEnd:kidPos]
+	copy(c.serverNonce[:], resBody[signEnd:kidPos])
 	c.kid = binary.BigEndian.Uint64(resBody[kidPos:])
 
-	derivedKey := DeriveKey(shareKey, c.clientNonce, c.serverNonce)
+	derivedKey := DeriveKey(shareKey, c.clientNonce[:], c.serverNonce[:])
 	if err := c.initAESGCMKey(derivedKey); err != nil {
 		return err
 	}

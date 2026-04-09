@@ -404,3 +404,86 @@ func TestServerClose(t *testing.T) {
 }
 
 var _ io.ReadWriteCloser = (*Conn)(nil)
+
+func TestLargePacket(t *testing.T) {
+	certPEM, keyPEM, err := GenerateSelfSignedCert("test-server", time.Now(), time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatalf("GenerateSelfSignedCert failed: %v", err)
+	}
+
+	cert, keyBytes, err := parseCertAndKey(certPEM, keyPEM)
+	if err != nil {
+		t.Fatalf("parseCertAndKey failed: %v", err)
+	}
+
+	srv, err := NewServerFromMem(cert, keyBytes)
+	if err != nil {
+		t.Fatalf("NewServer failed: %v", err)
+	}
+
+	lis, err := srv.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen failed: %v", err)
+	}
+
+	serverConnCh := make(chan net.Conn, 1)
+	go func() {
+		conn, err := lis.Accept()
+		if err != nil {
+			return
+		}
+		serverConnCh <- conn
+	}()
+
+	conn, err := DialWithCert("tcp", lis.Addr().String(), cert)
+	if err != nil {
+		t.Fatalf("Dial failed: %v", err)
+	}
+	defer conn.Close()
+
+	largeData := make([]byte, 1024)
+	for i := range largeData {
+		largeData[i] = byte(i)
+	}
+
+	_, err = conn.Write(largeData)
+	if err != nil {
+		t.Fatalf("Write failed: %v", err)
+	}
+
+	serverConn := <-serverConnCh
+	if serverConn == nil {
+		t.Fatal("Accept failed")
+	}
+	defer serverConn.Close()
+
+	buf := make([]byte, 1024)
+	n, err := serverConn.Read(buf)
+	if err != nil {
+		t.Fatalf("Server read failed: %v", err)
+	}
+
+	_, err = serverConn.Write(buf[:n])
+	if err != nil {
+		t.Fatalf("Server write failed: %v", err)
+	}
+
+	readBuf := make([]byte, 1024)
+	n, err = conn.Read(readBuf)
+	if err != nil {
+		t.Fatalf("Client read failed: %v", err)
+	}
+
+	if n != 1024 {
+		t.Errorf("expected 1024 bytes, got %d", n)
+	}
+
+	for i := 0; i < 1024; i++ {
+		if readBuf[i] != byte(i) {
+			t.Errorf("data mismatch at index %d", i)
+			break
+		}
+	}
+
+	lis.Close()
+}

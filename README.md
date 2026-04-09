@@ -15,7 +15,7 @@
 - ⚡ **Nonce-enhanced Key Derivation** - SHA256(ECDH key || clientNonce || serverNonce)
 - 🌐 **Standard net.Conn Interface** - Drop-in replacement for standard net.Conn
 - 🚀 **High Performance** - Minimal overhead, optimized for low latency
-- 🔄 **Session Key Caching** - LRU cache to reduce handshake overhead
+- 🔄 **Memory Pool** - sync.Pool for efficient buffer reuse
 - 📦 **Minimal Dependencies** - Zero external dependencies (pure Go)
 - ⏱️ **Deadline Support** - Full support for read/write deadlines
 
@@ -168,7 +168,7 @@ func main() {
 
 #### Handshake Flow
 
-1. Client sends: `[6B "STCP"] [32B clientPubKey] [32B clientNonce]`
+1. Client sends: `[4B "STCP"] [32B clientPubKey] [32B clientNonce]`
 2. Server validates, generates ECDH shared key
 3. Server responds: `[2B certLen] [cert] [32B serverPubKey] [512B sign] [32B serverNonce] [8B kid]`
 4. Both derive encryption key: `SHA256(ECDH key || clientNonce || serverNonce)`
@@ -251,7 +251,7 @@ MIT License - see [LICENSE](LICENSE) for details.
 - ⚡ **Nonce 增强密钥派生** - SHA256(ECDH密钥 || 客户端Nonce || 服务端Nonce)
 - 🌐 **标准 net.Conn 接口** - 可直接替代标准 net.Conn
 - 🚀 **高性能** - 极低开销，优化低延迟场景
-- 🔄 **会话密钥缓存** - LRU 缓存减少握手开销
+- 🔄 **内存池** - sync.Pool 高效缓冲区复用
 - 📦 **最小依赖** - 零外部依赖（纯 Go 实现）
 - ⏱️ **超时支持** - 完整支持读写超时
 
@@ -404,7 +404,7 @@ func main() {
 
 #### 握手流程
 
-1. 客户端发送: `[6B "STCP"] [32B 客户端公钥] [32B 客户端Nonce]`
+1. 客户端发送: `[4B "STCP"] [32B 客户端公钥] [32B 客户端Nonce]`
 2. 服务端验证，生成 ECDH 共享密钥
 3. 服务端响应: `[2B 证书长度] [证书] [32B 服务端公钥] [512B 签名] [32B 服务端Nonce] [8B 密钥ID]`
 4. 双方派生加密密钥: `SHA256(ECDH密钥 || 客户端Nonce || 服务端Nonce)`
