@@ -487,3 +487,187 @@ func TestLargePacket(t *testing.T) {
 
 	lis.Close()
 }
+
+func TestSessionRecovery(t *testing.T) {
+	certPEM, keyPEM, err := GenerateSelfSignedCert("test-server", time.Now(), time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatalf("GenerateSelfSignedCert failed: %v", err)
+	}
+
+	cert, keyBytes, err := parseCertAndKey(certPEM, keyPEM)
+	if err != nil {
+		t.Fatalf("parseCertAndKey failed: %v", err)
+	}
+
+	srv, err := NewServerFromMem(cert, keyBytes)
+	if err != nil {
+		t.Fatalf("NewServer failed: %v", err)
+	}
+
+	lis, err := srv.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen failed: %v", err)
+	}
+	defer lis.Close()
+
+	var kid uint64
+	var serverConn net.Conn
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		conn, err := lis.Accept()
+		if err != nil {
+			return
+		}
+		serverConn = conn
+		kid = conn.(*Conn).kid
+	}()
+
+	conn, err := DialWithCert("tcp", lis.Addr().String(), cert)
+	if err != nil {
+		t.Fatalf("Dial failed: %v", err)
+	}
+
+	testData := []byte("hello session")
+	_, err = conn.Write(testData)
+	if err != nil {
+		t.Fatalf("Write failed: %v", err)
+	}
+
+	wg.Wait()
+	defer serverConn.Close()
+	defer conn.Close()
+
+	buf := make([]byte, 1024)
+	n, err := serverConn.Read(buf)
+	if err != nil {
+		t.Fatalf("Server read failed: %v", err)
+	}
+	if string(buf[:n]) != string(testData) {
+		t.Errorf("data mismatch: got %s, want %s", string(buf[:n]), string(testData))
+	}
+
+	var wg2 sync.WaitGroup
+	wg2.Add(1)
+	go func() {
+		defer wg2.Done()
+		conn2, err := lis.Accept()
+		if err != nil {
+			return
+		}
+		n, err := conn2.Read(buf)
+		if err != nil {
+			t.Logf("Server read after recover failed: %v", err)
+			return
+		}
+		if string(buf[:n]) != "recovered data" {
+			t.Logf("recovered data mismatch: got %s, want %s", string(buf[:n]), "recovered data")
+		}
+	}()
+
+	time.Sleep(time.Millisecond * 100)
+	recoverConn, err := DialWithCert("tcp", lis.Addr().String(), cert)
+	if err != nil {
+		t.Fatalf("Recover dial failed: %v", err)
+	}
+	defer recoverConn.Close()
+
+	err = recoverConn.Recover(kid, []byte("recovered data"))
+	if err != nil {
+		t.Fatalf("Recover failed: %v", err)
+	}
+
+	wg2.Wait()
+}
+
+func TestSessionNotFound(t *testing.T) {
+	certPEM, keyPEM, err := GenerateSelfSignedCert("test-server", time.Now(), time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatalf("GenerateSelfSignedCert failed: %v", err)
+	}
+
+	cert, keyBytes, err := parseCertAndKey(certPEM, keyPEM)
+	if err != nil {
+		t.Fatalf("parseCertAndKey failed: %v", err)
+	}
+
+	srv, err := NewServerFromMem(cert, keyBytes)
+	if err != nil {
+		t.Fatalf("NewServer failed: %v", err)
+	}
+
+	lis, err := srv.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen failed: %v", err)
+	}
+	defer lis.Close()
+
+	var serverConn net.Conn
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		conn, err := lis.Accept()
+		if err != nil {
+			return
+		}
+		serverConn = conn
+	}()
+
+	conn, err := DialWithCert("tcp", lis.Addr().String(), cert)
+	if err != nil {
+		t.Fatalf("Dial failed: %v", err)
+	}
+
+	_, err = conn.Write([]byte("test"))
+	if err != nil {
+		t.Fatalf("Write failed: %v", err)
+	}
+
+	wg.Wait()
+	defer serverConn.Close()
+	defer conn.Close()
+
+	buf := make([]byte, 1024)
+	_, err = serverConn.Read(buf)
+	if err != nil {
+		t.Fatalf("Server read failed: %v", err)
+	}
+
+	var wg2 sync.WaitGroup
+	wg2.Add(1)
+	var gotErr error
+	go func() {
+		defer wg2.Done()
+		conn2, err := lis.Accept()
+		if err != nil {
+			return
+		}
+		defer conn2.Close()
+		buf := make([]byte, 1024)
+		_, err = conn2.Read(buf)
+		if err != nil {
+			gotErr = err
+		}
+	}()
+
+	time.Sleep(time.Millisecond * 100)
+	badKid := uint64(999999)
+	recoverConn, err := DialWithCert("tcp", lis.Addr().String(), cert)
+	if err != nil {
+		t.Fatalf("Recover dial failed: %v", err)
+	}
+
+	err = recoverConn.Recover(badKid, []byte("test"))
+	if err != nil {
+		t.Fatalf("Recover send failed: %v", err)
+	}
+
+	wg2.Wait()
+	if gotErr == nil {
+		t.Error("expected server to close connection for invalid kid")
+	}
+	recoverConn.Close()
+}

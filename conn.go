@@ -14,11 +14,40 @@ import (
 	"time"
 )
 
+const SessionTimeout = 10 * time.Minute
+
 var bodyBufferPool = sync.Pool{
 	New: func() any {
 		b := make([]byte, MaxBodySize)
 		return &b
 	},
+}
+
+type SessionState struct {
+	Key         []byte
+	ClientNonce [NonceLength]byte
+	ServerNonce [NonceLength]byte
+	ExpiresAt   time.Time
+}
+
+var sessionCache sync.Map
+
+func init() {
+	go cleanupExpiredSessions()
+}
+
+func cleanupExpiredSessions() {
+	for {
+		time.Sleep(time.Minute)
+		now := time.Now()
+		sessionCache.Range(func(key, value any) bool {
+			state := value.(*SessionState)
+			if now.After(state.ExpiresAt) {
+				sessionCache.Delete(key)
+			}
+			return true
+		})
+	}
 }
 
 type Conn struct {
@@ -95,10 +124,17 @@ func (c *Conn) Read(b []byte) (n int, err error) {
 		return 0, err
 	}
 
-	if header.Type() != HeaderTypeCryptoData {
+	switch header.Type() {
+	case HeaderTypeCryptoData:
+		return c.readData(b, header)
+	case HeaderTypeCryptoRecover:
+		return c.handleRecover(b, header)
+	default:
 		return 0, ErrUnexpectedPrefix
 	}
+}
 
+func (c *Conn) readData(b []byte, header Header) (n int, err error) {
 	bodyLen := header.ContentLength()
 	if bodyLen == 0 {
 		return 0, ErrEmptyBody
@@ -120,6 +156,60 @@ func (c *Conn) Read(b []byte) (n int, err error) {
 
 	copy(b, data)
 	return len(data), nil
+}
+
+func (c *Conn) handleRecover(b []byte, header Header) (n int, err error) {
+	body, err := header.ReadBody(c.Conn)
+	if err != nil {
+		return 0, err
+	}
+
+	if len(body) < 8 {
+		return 0, ErrInvalidBody
+	}
+
+	kid := binary.BigEndian.Uint64(body[:8])
+	state, ok := sessionCache.Load(kid)
+	if !ok {
+		return 0, ErrSessionNotFound
+	}
+
+	s := state.(*SessionState)
+	if time.Now().After(s.ExpiresAt) {
+		sessionCache.Delete(kid)
+		return 0, ErrSessionExpired
+	}
+
+	c.key = s.Key
+	c.clientNonce = s.ClientNonce
+	c.serverNonce = s.ServerNonce
+	c.kid = kid
+	if err := c.initAESGCMKey(c.key); err != nil {
+		return 0, err
+	}
+
+	data := body[8:]
+	if len(data) == 0 {
+		return 0, nil
+	}
+
+	plaintext, err := c.Decrypt(data)
+	if err != nil {
+		return 0, err
+	}
+	copy(b, plaintext)
+	return len(plaintext), nil
+}
+
+func (c *Conn) Recover(kid uint64, data []byte) error {
+	if len(data) > 0 {
+		cipherData, err := c.Encrypt(data)
+		if err != nil {
+			return err
+		}
+		return SendRecover(c.Conn, kid, cipherData)
+	}
+	return SendRecover(c.Conn, kid)
 }
 
 func (c *Conn) Write(b []byte) (n int, err error) {
@@ -197,9 +287,9 @@ func (c *Conn) serverHandshake(conn net.Conn, cert *x509.Certificate, privateKey
 		return err
 	}
 
-	spiderBytes := body[:len(Stcp)]
-	for i := range spiderBytes {
-		if spiderBytes[i] != Stcp[i] {
+	stcpBytes := body[:len(Stcp)]
+	for i := range stcpBytes {
+		if stcpBytes[i] != Stcp[i] {
 			return ErrUnexpectedPrefix
 		}
 	}
@@ -252,6 +342,13 @@ func (c *Conn) serverHandshake(conn net.Conn, cert *x509.Certificate, privateKey
 	if err := c.initAESGCMKey(derivedKey); err != nil {
 		return err
 	}
+
+	sessionCache.Store(c.kid, &SessionState{
+		Key:         c.key,
+		ClientNonce: c.clientNonce,
+		ServerNonce: c.serverNonce,
+		ExpiresAt:   time.Now().Add(SessionTimeout),
+	})
 
 	conn.SetWriteDeadline(time.Now().Add(time.Second * 30))
 	err = SendOk(conn, HeaderTypeCryptoHandshake, respBody)

@@ -34,13 +34,6 @@ const (
 	HeaderStatusInvalidBody   HeaderStatus = 4
 )
 
-type HeaderFlags = byte
-
-const (
-	HeaderFlagCompressed HeaderFlags = 1 << iota
-	HeaderFlagEncrypted
-)
-
 type Header [HeaderLength]byte
 
 func (h Header) Version() byte {
@@ -65,14 +58,6 @@ func (h Header) Status() byte {
 
 func (h *Header) setStatus(v byte) {
 	h[2] = v
-}
-
-func (h Header) Flags() byte {
-	return h[3]
-}
-
-func (h *Header) setFlags(v byte) {
-	h[3] = v
 }
 
 func (h Header) ContentLength() uint32 {
@@ -177,4 +162,29 @@ func SendOk(w io.Writer, ht byte, body ...[]byte) error {
 		return err
 	}
 	return p.Send(w)
+}
+
+func SendRecover(w io.Writer, kid uint64, data ...[]byte) error {
+	bodyLen := 8
+	for _, d := range data {
+		bodyLen += len(d)
+	}
+	h := newHeader(HeaderTypeCryptoRecover, HeaderStatusSuccess, uint32(bodyLen))
+	_, err := w.Write(h[:])
+	if err != nil {
+		return err
+	}
+	var buf [8]byte
+	binary.BigEndian.PutUint64(buf[:], kid)
+	_, err = w.Write(buf[:])
+	if err != nil {
+		return err
+	}
+	for _, d := range data {
+		_, err = w.Write(d)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }

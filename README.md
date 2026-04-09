@@ -18,6 +18,7 @@
 - 🔄 **Memory Pool** - sync.Pool for efficient buffer reuse
 - 📦 **Minimal Dependencies** - Zero external dependencies (pure Go)
 - ⏱️ **Deadline Support** - Full support for read/write deadlines
+- 🔑 **Session Recovery** - Quick session resumption without full handshake (10 min TTL)
 
 ### Installation
 
@@ -155,6 +156,7 @@ func main() {
 | `(c *Conn) SetDeadline(t time.Time) error` | Set read/write deadline |
 | `(c *Conn) SetReadDeadline(t time.Time) error` | Set read deadline |
 | `(c *Conn) SetWriteDeadline(t time.Time) error` | Set write deadline |
+| `(c *Conn) Recover(kid uint64, data []byte) error` | Recover session with kid and optional data |
 
 ### Certificate Functions
 
@@ -172,17 +174,25 @@ func main() {
 2. Server validates, generates ECDH shared key
 3. Server responds: `[2B certLen] [cert] [32B serverPubKey] [512B sign] [32B serverNonce] [8B kid]`
 4. Both derive encryption key: `SHA256(ECDH key || clientNonce || serverNonce)`
+5. Server stores session state (TTL: 10 minutes)
+
+#### Session Recovery Flow
+
+1. Client sends: `[Type: Recover] [8B kid] [encrypted data (optional)]`
+2. Server validates kid and restores session key
+3. If data present, decrypts and processes immediately
+4. Connection continues in normal data mode
 
 #### Packet Format
 
 ```
-[1B Ver] [1B Type] [1B Status] [1B Flags] [4B Length] [Body]
+[1B Ver] [1B Type] [1B Status] [1B Reserved] [4B Length] [Body]
 ```
 
 - **Ver**: Protocol version (1)
-- **Type**: Packet type (handshake/recover/data)
+- **Type**: Packet type (1=handshake, 2=recover, 3=data)
 - **Status**: Success/fail status
-- **Flags**: Compression and encryption flags
+- **Reserved**: Reserved for future use
 - **Length**: Body length (4 bytes)
 - **Body**: Encrypted payload
 
@@ -254,6 +264,7 @@ MIT License - see [LICENSE](LICENSE) for details.
 - 🔄 **内存池** - sync.Pool 高效缓冲区复用
 - 📦 **最小依赖** - 零外部依赖（纯 Go 实现）
 - ⏱️ **超时支持** - 完整支持读写超时
+- 🔑 **会话恢复** - 无需完整握手快速恢复会话（10分钟有效期）
 
 ### 安装
 
@@ -391,6 +402,7 @@ func main() {
 | `(c *Conn) SetDeadline(t time.Time) error` | 设置读写超时 |
 | `(c *Conn) SetReadDeadline(t time.Time) error` | 设置读取超时 |
 | `(c *Conn) SetWriteDeadline(t time.Time) error` | 设置写入超时 |
+| `(c *Conn) Recover(kid uint64, data []byte) error` | 使用 kid 恢复会话，可携带数据 |
 
 ### 证书相关函数
 
@@ -408,17 +420,25 @@ func main() {
 2. 服务端验证，生成 ECDH 共享密钥
 3. 服务端响应: `[2B 证书长度] [证书] [32B 服务端公钥] [512B 签名] [32B 服务端Nonce] [8B 密钥ID]`
 4. 双方派生加密密钥: `SHA256(ECDH密钥 || 客户端Nonce || 服务端Nonce)`
+5. 服务端存储会话状态（有效期：10分钟）
+
+#### 会话恢复流程
+
+1. 客户端发送: `[类型: Recover] [8B 密钥ID] [加密数据（可选）]`
+2. 服务端验证密钥ID并恢复会话密钥
+3. 如有数据，立即解密处理
+4. 连接进入正常数据模式
 
 #### 数据包格式
 
 ```
-[1B 版本] [1B 类型] [1B 状态] [1B 标志] [4B 长度] [数据体]
+[1B 版本] [1B 类型] [1B 状态] [1B 保留] [4B 长度] [数据体]
 ```
 
 - **版本**: 协议版本 (1)
-- **类型**: 数据包类型（握手/恢复/数据）
+- **类型**: 数据包类型（1=握手, 2=恢复, 3=数据）
 - **状态**: 成功/失败状态
-- **标志**: 压缩和加密标志
+- **保留**: 保留字段
 - **长度**: 数据体长度 (4字节)
 - **数据体**: 加密载荷
 
