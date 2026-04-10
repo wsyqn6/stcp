@@ -16,6 +16,13 @@ import (
 
 const SessionTimeout = 10 * time.Minute
 
+var bodyBufferPool = sync.Pool{
+	New: func() any {
+		b := make([]byte, MaxBodySize)
+		return &b
+	},
+}
+
 type SessionState struct {
 	Key         []byte
 	ClientNonce [NonceLength]byte
@@ -136,7 +143,10 @@ func (c *Conn) readData(b []byte, header Header) (n int, err error) {
 		return 0, ErrPacketTooLarge
 	}
 
-	cipherBody := make([]byte, bodyLen)
+	bufPtr := bodyBufferPool.Get().(*[]byte)
+	cipherBody := (*bufPtr)[:bodyLen]
+	defer bodyBufferPool.Put(bufPtr)
+
 	_, err = io.ReadFull(c.Conn, cipherBody)
 	if err != nil {
 		return 0, err
@@ -254,13 +264,6 @@ func (c *Conn) SetWriteDeadline(t time.Time) error {
 		c.writeDeadline.Store(&t)
 	}
 	return nil
-}
-
-func (c *Conn) handshake(conn net.Conn, isServer bool, cert *x509.Certificate, privateKey any, rootCert *x509.Certificate) error {
-	if isServer {
-		return c.serverHandshake(conn, cert, privateKey)
-	}
-	return c.clientHandshake(conn, cert, rootCert)
 }
 
 func (c *Conn) serverHandshake(conn net.Conn, cert *x509.Certificate, privateKey any) error {
