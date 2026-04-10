@@ -16,13 +16,6 @@ import (
 
 const SessionTimeout = 10 * time.Minute
 
-var bodyBufferPool = sync.Pool{
-	New: func() any {
-		b := make([]byte, MaxBodySize)
-		return &b
-	},
-}
-
 type SessionState struct {
 	Key         []byte
 	ClientNonce [NonceLength]byte
